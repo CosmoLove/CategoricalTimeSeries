@@ -1,0 +1,366 @@
+---
+title: "prova"
+output: html_document
+---
+
+# Funzioni
+
+```{r}
+
+# data una matrice dei coefficenti ed un vettore Z_{t-1} calcola le probabilità di tranzizione
+trans_prob <- function(this_beta, z_t_m1){
+  fl = exp(this_beta %*% z_t_m1)
+  fs = 1+ sum(fl)
+  this_pi = c(fl/fs, 1/fs)
+  this_pi
+}
+
+# vettore delle probabilità condizionali pi_t
+pi_t <- function(this_beta, z_t_m1){
+  return(exp(this_beta %*% z_t_m1)/(1+sum(exp(this_beta %*% z_t_m1))))
+}
+
+# d theta/ d pi_t
+Sigma_t_m1 <- function(this_pi_t){
+  # set all values to this
+  this_Sigma_t_m1 = matrix(1/(1-sum(this_pi_t)), length(this_pi_t), length(this_pi_t))
+  # modify diagonal
+  for (i in 1:length(this_pi_t)) {
+    this_Sigma_t_m1[i,i] = (this_pi_t[i] + 1 - sum(this_pi_t))/(this_pi_t[i] * (1-sum(this_pi_t)))
+  }
+  return(this_Sigma_t_m1)
+}
+
+# d pi / d nu
+D_t <- function(beta_mat, z_t_m1){
+  # set all values to this
+  this_D_t = matrix(rep(1/(1+sum(exp(beta_mat %*% z_t_m1)))^2, nrow(beta_mat)^2),ncol = nrow(beta_mat))
+  # aggiusto gli altri
+  for (i_r in 1:nrow(beta_mat)) {
+      for (i_c in 1:nrow(beta_mat)) {
+        if (i_r==i_c) {
+          num = exp(beta_mat[i_r, ] %*% z_t_m1)*(1+sum(exp(beta_mat %*% z_t_m1))) - 
+            exp(2*beta_mat[i_r, ] %*% z_t_m1)
+        }
+        else {
+          num = -exp(beta_mat[i_r, ] %*% z_t_m1) * exp(beta_mat[i_c, ] %*% z_t_m1)        
+        }
+        this_D_t[i_r, i_c] = this_D_t[i_r, i_c] * num
+    }
+  }
+  return(this_D_t)
+}
+
+# d l_t / d beta
+S_t <- function(Y_t, z_t_m1, beta_mat){
+  this_pi = pi_t(beta_mat, z_t_m1)
+  zz_t_m1 = matrix(0, ncol = n_cat-1, nrow = (n_cat-1)*length(z_t_m1))
+  for (gr in 1:(n_cat-1)) {
+    zz_t_m1[((gr-1)*length(z_t_m1)+1):((gr-1)*length(z_t_m1) + length(z_t_m1)), gr] = z_t_m1
+  }
+  left = t((matrix(Y_t) - this_pi)) %*% (Sigma_t_m1(this_pi) %*% D_t(beta_mat, z_t_m1))
+  this_der = t(matrix(zz_t_m1%*%t(left), nrow=length(z_t_m1)))
+  return(this_der)
+}
+
+# conditional information matrix al timestep t
+G_t <- function(Y_t, z_t_m1, beta_mat){
+  this_pi = pi_t(beta_mat, z_t_m1)
+  zz_t_m1 = matrix(0, ncol = n_cat-1, nrow = (n_cat-1)*length(z_t_m1))
+  for (gr in 1:(n_cat-1)) {
+    zz_t_m1[((gr-1)*length(z_t_m1)+1):((gr-1)*length(z_t_m1) + length(z_t_m1)), gr] = z_t_m1
+  }
+  U_t = t(D_t(beta_mat, z_t_m1))%*%Sigma_t_m1(this_pi)
+  Sigma_t = solve(Sigma_t_m1(this_pi))
+  this_G = zz_t_m1 %*% U_t %*% Sigma_t %*% t(U_t) %*% t(zz_t_m1)
+  return(this_G)
+  return(t(matrix(t(this_G), nrow = length(z_t_m1))))
+}
+
+# calcolo S_N e G_N
+GS_N <- function(Y_N, Z_N, beta_mat, n_cat){
+  
+  this_S_N = matrix(rep(0, nrow(beta_mat)*ncol(beta_mat)), ncol = ncol(beta_mat))
+  this_G_N = matrix(rep(0, ((n_cat-1)*ncol(Z_N))^2), ncol = (n_cat-1)*ncol(Z_N))
+  
+  for (tau in 1:length(Y_N)) {
+    # vettore categorico al timestep selezionato
+    Y_t = rep(0,n_cat-1) # dim m-1
+    if (Y_N[tau]<=n_cat-1) {
+      Y_t[Y_N[tau]] = 1
+    }
+    # covariate al tempo selezionato
+    z_t_m1 = Z_N[tau, ]
+    
+    this_S_N = this_S_N + S_t(Y_t, z_t_m1, beta_mat)
+    this_G_N = this_G_N + G_t(Y_t, z_t_m1, beta_mat) 
+  }
+  return(list(this_G_N, this_S_N))
+}
+
+# vettore Y_t da valore y_t
+cat_Y <- function(y_t, n_cat){
+  Y_t = rep(0,n_cat-1) # dim m-1
+  if (y_t<=n_cat-1) {Y_t[y_t] = 1}
+  return(Y_t)
+}
+
+# log likelihood al tempo t
+log_lik_t <- function(Y_t, z_t_m1, beta){
+  this_pi = pi_t(beta, z_t_m1)
+  return(Y_t %*% log(this_pi) + (1-sum(Y_t))*log(1-sum(this_pi)))
+}
+
+# log likelihood totale
+log_lik <- function(Y_N, Z_N, beta, n_cat){
+  if (is.null(dim(beta))) {
+    beta = t(matrix(beta, ncol = n_cat-1))
+  }
+  log_lik_val = 0
+  for (tau in 1:length(Y_N)) {
+    Y_t = cat_Y(Y_N[tau], n_cat)
+    z_t_m1 = Z_N[tau,]
+    log_lik_val = log_lik_val + log_lik_t(Y_t, z_t_m1, beta)
+  }
+  log_lik_val
+}
+
+```
+
+# Primo esempio paper
+
+```{r}
+# n_cat:= m
+n_cat = 3
+
+# lunghezza serie temporale
+N = 100
+
+# betada fittare
+beta_true = t(matrix(c(.3,1.25,.5, 1, -.2,-2,-.75,-1), nrow = 4))
+
+```
+
+
+```{r}
+Y_N = c(1)
+Z_N = c(1,0,0,0)
+prob_mat=c()
+for (t in 0:N) {
+  Y_t_m1 = rep(0,n_cat-1) # dim m-1
+  if (Y_N[length(Y_N)]<=n_cat-1) {
+    Y_t_m1[Y_N[length(Y_N)]] = 1
+  }
+  z_t_m1 = c(1,cos(2*pi*t/12), Y_t_m1[1], Y_t_m1[2])
+  Z_N = rbind(Z_N, unname(z_t_m1))
+  this_trans_prob =  trans_prob(beta_true, z_t_m1)
+  prob_mat = c(prob_mat, this_trans_prob)
+  next_y = sample(1:n_cat, 1, prob=this_trans_prob)
+  Y_N = c(Y_N, next_y) 
+}
+prob_mat = t(matrix(prob_mat, nrow=3))
+Z_N = unname(Z_N)
+plot(Y_N, type='l')
+plot(prob_mat[,1], type='l')
+plot(prob_mat[,2], type='l')
+plot(prob_mat[,3], type='l')
+rm(next_y, prob_mat, this_trans_prob, z_t_m1, Y_t_m1, t)
+```
+
+```{r}
+
+
+all_res = c()
+for (i in 1:1000) {
+  all_res = c(all_res,
+              log_lik(Y_N, Z_N, beta_true + .5*matrix(rnorm((n_cat-1)*ncol(Z_N)), ncol = ncol(Z_N)), n_cat))
+  
+}
+hist(all_res, breaks=100)  
+
+```
+
+```{r}
+
+beta_true_vec = c(t(beta_true))
+small_disp_vec = c()
+grad_vec = c()
+for (j in 1:length(beta_true_vec)) {
+  for (i in -15:15) {
+    disp_vec = rep(0,length(beta_true_vec))
+    disp_vec[j] = i/21
+    small_disp_vec = c(small_disp_vec,
+                       log_lik(Y_N, Z_N, beta_true_vec + disp_vec, n_cat))
+    
+    this_GS_N = GS_N(Y_N, Z_N, beta_true + disp_vec, n_cat)
+    S_N = this_GS_N[[2]]
+    grad_vec = c(grad_vec, S_N[j])
+  
+  }
+}
+small_disp_vec = matrix(small_disp_vec, nrow = 31)
+grad_vec = matrix(grad_vec, nrow = 31)
+x_disp = c()
+x_grad = c()
+for (trg in 1:ncol(small_disp_vec)) {
+  x_disp = c(x_disp, which.max(small_disp_vec[,trg]))
+  x_grad = c(x_grad, which.min(grad_vec[,trg]^2))
+}
+
+library(ggplot2)
+library(magrittr)
+
+data.frame(x_disp = x_disp,
+           x_grad = x_grad) %>%
+  ggplot() +
+    geom_point(aes(x=x_disp, y=x_grad)) +
+    geom_abline(intercept = 0)
+
+trg = 2
+data.frame(x_coord = -15:15/21,
+           log_lik = small_disp_vec[,trg],
+           grad = grad_vec[,trg]) %>%
+  ggplot() +
+  geom_line(aes(x=x_coord, y=log_lik-min(log_lik)))+
+  geom_line(aes(x=x_coord, y=grad)) +
+  geom_hline(yintercept = 0)
+
+
+```
+
+```{r}
+#beta_opt = beta_true + .1*matrix(rnorm((n_cat-1)*ncol(Z_N)), ncol = ncol(Z_N))
+beta_opt = matrix(rnorm((n_cat-1)*ncol(Z_N)), ncol = ncol(Z_N))
+beta_opt = matrix(rep(0, (n_cat-1)*ncol(Z_N)), ncol = ncol(Z_N))
+
+err = c()
+for (i in 1:5) {
+    this_GS_N = GS_N(Y_N, Z_N, beta_opt, n_cat)
+    S_N = this_GS_N[[2]]
+    G_N = this_GS_N[[1]]
+    G_N_m1 = solve(G_N)
+    corr = G_N_m1 %*% c(t(S_N))
+    beta_opt = beta_opt + t(matrix(corr, nrow = ncol(beta_opt)))
+    err = c(err, sum(c(beta_true-beta_opt)^2))
+}
+
+beta_opt_grad = beta_opt
+err_grad = c()
+for (i in 1:1000) {
+    this_GS_N = GS_N(Y_N, Z_N, beta_opt, n_cat)
+    S_N = this_GS_N[[2]]
+    beta_opt_grad = beta_opt_grad + 0.1*S_N
+    err_grad = c(err_grad, sum(c(beta_true-beta_opt_grad)^2))
+}
+
+plot(err, type = 'l')
+plot(err_grad, type = 'l')
+
+```
+
+```{r}
+beta_opt_grad
+beta_opt
+beta_true
+```
+
+```{r}
+
+log_lik_NM <- function(data, lik_par){
+  this_beta = data
+  Y_N = lik_par$Y_N
+  Z_N = lik_par$Z_N
+  n_cat = lik_par$n_cat
+  if (is.null(dim(this_beta))) {
+    this_beta = t(matrix(this_beta, ncol = n_cat-1))
+  }
+  log_lik_val = 0
+  for (tau in 1:length(Y_N)) {
+    Y_t = cat_Y(Y_N[tau], n_cat)
+    z_t_m1 = Z_N[tau,]
+    log_lik_val = log_lik_val + log_lik_t(Y_t, z_t_m1, this_beta)
+  }
+  -log_lik_val
+}
+lik_par = list(Y_N = Y_N, Z_N = Z_N, n_cat = n_cat)
+
+
+beta_0 = matrix(rep(0, (n_cat-1)*ncol(Z_N)), ncol = ncol(Z_N))
+beta_opt_NM = optim(par=c(beta_0),fn=log_lik_NM, lik_par = lik_par,
+      control=list())
+
+t(matrix(beta_opt_NM$par, nrow = 4))
+
+beta_true
+
+```
+
+
+```{r}
+
+
+
+
+dna = read.csv('dna.arff.txt', header = F)
+dna = dna$V1
+n_cat = 4
+
+# serie temporale
+Y_N = dna[-1:-4]
+Z_N_0 = c()
+for (r in 5:(length(dna))) {
+  Z_N_0 = rbind(Z_N_0, c(1
+                         #,cat_Y(dna[r-1], n_cat)
+                         ))
+}
+Z_N_0 = unname(Z_N_0)
+Z_N = c()
+for (r in 5:(length(dna))) {
+  Z_N = rbind(Z_N, c(1
+                     ,cat_Y(dna[r-1], n_cat)
+                     #,cat_Y(dna[r-2], n_cat)
+                     ))
+}
+Z_N = unname(Z_N)
+
+#beta_opt = beta_true + .1*matrix(rnorm((n_cat-1)*ncol(Z_N)), ncol = ncol(Z_N))
+beta_0 = matrix(rep(0, (n_cat-1)*ncol(Z_N_0)), ncol = ncol(Z_N_0))
+beta_opt = matrix(rep(0, (n_cat-1)*ncol(Z_N)), ncol = ncol(Z_N))
+
+err = c()
+for (i in 1:5) {
+
+  this_GS_N = GS_N(Y_N, Z_N_0, beta_0, n_cat)
+  S_N = this_GS_N[[2]]
+  G_N = this_GS_N[[1]]
+  G_N_m1 = solve(G_N)
+  corr = G_N_m1 %*% c(t(S_N))
+  beta_0 = beta_0 + t(matrix(corr, nrow = ncol(beta_0)))
+  
+  
+  this_GS_N = GS_N(Y_N, Z_N, beta_opt, n_cat)
+  S_N = this_GS_N[[2]]
+  G_N = this_GS_N[[1]]
+  G_N_m1 = solve(G_N)
+  corr = G_N_m1 %*% c(t(S_N))
+  beta_opt = beta_opt + t(matrix(corr, nrow = ncol(beta_opt)))
+
+  
+  Deviance = -2*log_lik(Y_N, Z_N, beta_opt, n_cat)
+  p = length(c(beta_opt))
+  myAIC = Deviance + 2*p 
+  myBIC = Deviance + p*log(length(Y_N))
+  err = rbind(err, c(p, Deviance, myAIC, myBIC))
+}
+
+err
+
+lambda = -2*(log_lik(Y_N, Z_N_0, beta_0, n_cat) - log_lik(Y_N, Z_N, beta_opt, n_cat))
+lambda
+pchisq(lambda, df=21-12, lower.tail = F)
+
+
+
+```
+
+
